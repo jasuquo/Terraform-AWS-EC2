@@ -986,9 +986,6 @@ Observation:
 terraform apply -auto-approve
 
 
-The Deployed RDS Server 
-
-
 
 ## Step-13: Clean-Up
 
