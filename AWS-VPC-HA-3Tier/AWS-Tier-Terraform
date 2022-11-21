@@ -1,0 +1,1007 @@
+# one public instance deploy in the public presentation tier,2 private instances deployed in the business logic layer with http webserver installed, Rds database
+
+
+N/B Ensure you have configured terraform on your instance and startup your aws cli keys or this wont work 
+## What are we going implement?
+- Create VPC with 3-Tier Architecture (Web, App and DB)
+- Create AWS Security Group Terraform Module and define HTTP port 80, 22 inbound rule for entire internet access `0.0.0.0/0`
+- Create 2 EC2 Instances in VPC Private Subnets and install webserver
+- Create 2 EC2 Instance in VPC Public Subnet
+- deploy rds server in rds private subnet
+
+
+
+
+## Pre-requisite create an ec2-keypair
+- download  your AWS EC2 Key pair `terraform-key.pem` note the directory path
+/Users/joemile/Downloads/terraform-key.pem
+
+
+
+
+## Step-02: Create a terraform project folder on your server I named mine 3-tier
+- copy the terraform settings file and copy each contents of each coonfig files as shown below  which will create a 3-Tier VPC,deploy instances into the different subnets public and private and deploy rds db 
+ The following terraform config files should be created in your project folder.
+- app1-install.sh (bash script to install webserver on private subnet instance)
+- tfsettings.tf -terraform setting block file
+- datasource-ami.tf
+- vpc-module.tf
+- vpc-outputs.tf
+- vpc-variables.tf
+- vpc.auto.tfvars
+- security-group-outputs.tf
+- securitygroup-module-private.tf
+- securitygroup-module-public.tf
+- ec2-instance-auto.tfvars 
+- ec2-instance-outputs.tf
+- ec2-instance-private.tf
+- ec2-instance-public.tf
+- ec2-instance-variables.tf
+- rds-module.tf
+- rds-outputs.tf
+- rds-variables.tf
+- rdsdb.auto.tfvars
+- null-resource-provisioner.tf
+
+## Step-03: Add app1-install.sh
+- Add `app1-install.sh` in working directory
+```sh
+#! /bin/bash
+# Instance Identity Metadata Reference - https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instance-identity-documents.html
+sudo yum update -y
+sudo yum install -y httpd
+sudo systemctl enable httpd
+sudo service httpd start 
+sudo echo '<h1>Welcome to 3 tier deployment using terraform on Aws</h1>' | sudo tee /var/www/html/index.html
+sudo mkdir /var/www/html/app1
+sudo echo '<!DOCTYPE html> <html> <body style="background-color:rgb(250, 210, 210);"> <h1>Welcome to 3 tier deployment using terraform on aws  - APP-1</h1> <p>Terraform Demo</p> <p>Application Version: V1</p> </body></html>' | sudo tee /var/www/html/app1/index.html
+sudo curl http://169.254.169.254/latest/dynamic/instance-identity/document -o /var/www/html/app1/metadata.html
+```
+
+
+Step-03 tfsettings.tf create this file and paste the configs below
+
+Step-03 tfsettings.tf -terraform setting block file
+#Terraform settings Block
+terraform {
+ required_version = "~> 1.0" # which means any version equal & above 0.14 like 0.15, 0.16 etc and < 1.xx
+ required_providers {
+   aws = {
+     source  = "hashicorp/aws"
+     version = "~> 3.0" 
+   }
+ 
+     null = {
+      source = "hashicorp/null"
+      version = "3.0"
+    }
+ }
+}
+
+provider "aws" {
+ region = "us-east-1"
+}
+
+
+
+
+
+Step-04 data-sources-ami.tf create this file and paste the configs below
+
+#data sources for ami
+data "aws_ami" "amzlinux2" {
+ most_recent = true
+ owners = [ "amazon" ]
+ filter {
+   name = "name"
+   values = [ "amzn2-ami-hvm-*-gp2" ]
+ }
+ filter {
+   name = "root-device-type"
+   values = [ "ebs" ]
+ }
+ filter {
+   name = "virtualization-type"
+   values = [ "hvm" ]
+ }
+ filter {
+   name = "architecture"
+   values = [ "x86_64" ]
+ }
+}
+
+
+
+
+
+
+Step-05 vpc-module.tf create this file and paste the configs below
+# Create VPC Terraform Module
+module "vpc" {
+ source  = "terraform-aws-modules/vpc/aws"
+ version = "~>3.16" 
+ # version = "~> 2.78"
+
+ # VPC Basic Details
+ name = var.vpc_name
+ cidr = var.vpc_cidr_block  
+ azs                 = var.vpc_availability_zones
+ private_subnets     = var.vpc_private_subnets
+ public_subnets      = var.vpc_public_subnets
+ # Database Subnets
+ create_database_subnet_group = var.vpc_create_database_subnet_group
+ create_database_subnet_route_table= var.vpc_create_database_subnet_route_table
+ database_subnets    = var.vpc_database_subnets
+
+ #create_database_nat_gateway_route = true
+ #create_database_internet_gateway_route = true
+
+ # NAT Gateways - Outbound Communication
+ enable_nat_gateway = var.vpc_enable_nat_gateway
+ single_nat_gateway = var.vpc_single_nat_gateway
+
+ # VPC DNS Parameters
+ enable_dns_hostnames = true
+ enable_dns_support = true
+
+ public_subnet_tags = {
+   Type = "public-subnets"
+ }
+
+ private_subnet_tags = {
+   Type = "private-subnets"
+ }
+
+ database_subnet_tags = {
+   Type = "database-subnets"
+ }
+
+ tags = {
+   Owner = "Admin" //can be your organization name
+   Environment = "devops"
+ }
+
+ vpc_tags = {
+   Name = "aws-three-tier-vpc"
+ }
+}
+
+
+
+
+Step -06  vpc-outputs.tf create this file and paste the configs below
+
+# VPC Output Values
+
+# VPC ID
+output "vpc_id" {
+ description = "The ID of the VPC"
+ value       = module.vpc.vpc_id
+}
+
+# VPC CIDR blocks
+output "vpc_cidr_block" {
+ description = "The CIDR block of the VPC"
+ value       = module.vpc.vpc_cidr_block
+}
+
+# VPC Private Subnets
+output "private_subnets" {
+ description = "List of IDs of private subnets"
+ value       = module.vpc.private_subnets
+}
+
+# VPC Public Subnets
+output "public_subnets" {
+ description = "List of IDs of public subnets"
+ value       = module.vpc.public_subnets
+}
+
+# VPC NAT gateway Public IP
+output "nat_public_ips" {
+ description = "List of public Elastic IPs created for AWS NAT Gateway"
+ value       = module.vpc.nat_public_ips
+}
+
+# VPC AZs
+output "azs" {
+ description = "A list of availability zones spefified as argument to this module"
+ value       = module.vpc.azs
+}
+
+
+Step-07 vpc-variables.tf create this file and paste the configs below
+
+
+# VPC Input Variables
+
+# VPC Name
+variable "vpc_name" {
+ description = "VPC Name"
+ type = string
+ default = "aws-three-tier-vpc"
+}
+
+# VPC CIDR Block
+variable "vpc_cidr_block" {
+ description = "VPC CIDR Block"
+ type = string
+ default = "10.0.0.0/16"
+}
+
+# VPC Availability Zones
+variable "vpc_availability_zones" {
+ description = "VPC Availability Zones"
+ type = list(string)
+ default = ["us-east-1a", "us-east-1b"]
+}
+
+# VPC Public Subnets
+variable "vpc_public_subnets" {
+ description = "VPC Public Subnets"
+ type = list(string)
+ default = ["10.0.101.0/24", "10.0.102.0/24"]
+}
+
+# VPC Private Subnets
+variable "vpc_private_subnets" {
+ description = "VPC Private Subnets"
+ type = list(string)
+ default = ["10.0.1.0/24", "10.0.2.0/24"]
+}
+
+# VPC Database Subnets
+variable "vpc_database_subnets" {
+ description = "VPC Database Subnets"
+ type = list(string)
+ default = ["10.0.151.0/24", "10.0.152.0/24"]
+}
+
+# VPC Create Database Subnet Group (True / False)
+variable "vpc_create_database_subnet_group" {
+ description = "VPC Create Database Subnet Group"
+ type = bool
+ default = true
+}
+
+# VPC Create Database Subnet Route Table (True or False)
+variable "vpc_create_database_subnet_route_table" {
+ description = "VPC Create Database Subnet Route Table"
+ type = bool
+ default = true  
+}
+
+ # VPC Enable NAT Gateway (True or False)
+variable "vpc_enable_nat_gateway" {
+ description = "Enable NAT Gateways for Private Subnets Outbound Communication"
+ type = bool
+ default = true 
+}
+
+# VPC Single NAT Gateway (True or False)
+variable "vpc_single_nat_gateway" {
+ description = "Enable only single NAT Gateway in one Availability Zone to save costs during our demos"
+ type = bool
+ default = true
+}
+
+
+
+
+
+
+STEP-08 vpc.auto.tfvars create this file and paste the configs below
+# VPC Variables
+vpc_name = "aws-three-tier-vpc"
+vpc_cidr_block = "10.0.0.0/16"
+vpc_availability_zones = ["us-east-1a", "us-east-1b"]
+vpc_public_subnets = ["10.0.101.0/24", "10.0.102.0/24"]
+vpc_private_subnets = ["10.0.1.0/24", "10.0.2.0/24"]
+vpc_database_subnets= ["10.0.151.0/24", "10.0.152.0/24"]
+vpc_create_database_subnet_group = true
+vpc_create_database_subnet_route_table = true  
+vpc_enable_nat_gateway = true 
+vpc_single_nat_gateway = true
+
+
+
+
+Step 09 securitygroup-module-rds.tf create this file and paste the configs below
+# Security Group for AWS RDS DB
+module "rdsdb_sg" {
+ source  = "terraform-aws-modules/security-group/aws"
+ #version = "3.18.0"
+ version = "~>3.0.0"
+
+ name        = "rdsdb-sg"
+ description = "Access to MySQL DB for entire VPC CIDR Block"
+ vpc_id      = module.vpc.vpc_id
+
+ # ingress
+ ingress_with_cidr_blocks = [
+   {
+     from_port   = 3306
+     to_port     = 3306
+     protocol    = "tcp"
+     description = "MySQL access from within VPC"
+     cidr_blocks = module.vpc.vpc_cidr_block
+   },
+ ]
+ # Egress Rule - all-all open
+ egress_rules = ["all-all"] 
+ tags = {
+   Name = "rdsdb-sg"
+ }
+}
+
+
+
+Step 10 securitygroup-module-public.tf create this file and paste the configs below
+# Security Group for Public Bastion Host
+module "sg_public" {
+ source  = "terraform-aws-modules/security-group/aws"
+ version = "~>3.18.0"
+
+ name = "sg_public"
+ description = "Security Group with SSH port open for everybody (IPv4 CIDR), egress ports are all world open"
+ vpc_id = module.vpc.vpc_id
+ # Ingress Rules & CIDR Blocks
+ ingress_rules = ["ssh-tcp"]
+ ingress_cidr_blocks = ["0.0.0.0/0"]
+ # Egress Rule - all-all open
+ egress_rules = ["all-all"]
+ tags =  {
+   Name = "sg_public"
+ }
+}
+
+
+
+
+Step 11 securitygroup-module-private.tf create this file and paste the configs below
+
+# AWS EC2 Security Group Terraform Module
+# Security Group for Private EC2 Instances
+module "private_sg" {
+ source  = "terraform-aws-modules/security-group/aws"
+ version = "~>3.18.0"
+
+ name = "private_sg"
+ description = "Security Group with HTTP & SSH port open for entire VPC Block (IPv4 CIDR), egress ports are all world open"
+ vpc_id = module.vpc.vpc_id
+ # Ingress Rules & CIDR Blocks
+ ingress_rules = ["ssh-tcp", "http-80-tcp"]
+ ingress_cidr_blocks = [module.vpc.vpc_cidr_block]
+ # Egress Rule - all-all open
+ egress_rules = ["all-all"]
+ tags =  {
+   Name = "private_sg"
+ }
+}
+
+
+Step-12 security-group-outputs.tf create this file and paste the configs below
+
+# AWS EC2 Security Group Terraform Outputs
+
+# Public Bastion Host Security Group Outputs
+## public_sg_group_id
+output "sg_public_group_id" {
+ description = "The ID of the security group"
+ value       = module.sg_public.this_security_group_id
+}
+
+## public_sg_group_vpc_id
+output "sg_public_group_vpc_id" {
+ description = "The VPC ID"
+ value       = module.sg_public.this_security_group_vpc_id
+}
+
+## public_bastion_sg_group_name
+output "sg_public_group_name" {
+ description = "The name of the security group"
+ value       = module.sg_public.this_security_group_name
+}
+
+# Private EC2 Instances Security Group Outputs
+## private_sg_group_id
+output "private_sg_group_id" {
+ description = "The ID of the security group"
+ value       = module.private_sg.this_security_group_id
+}
+
+## private_sg_group_vpc_id
+output "private_sg_group_vpc_id" {
+ description = "The VPC ID"
+ value       = module.private_sg.this_security_group_vpc_id
+}
+
+## private_sg_group_name
+output "private_sg_group_name" {
+ description = "The name of the security group"
+ value       = module.private_sg.this_security_group_name
+}
+
+output "rds_security_group_id" {
+   description = "The rds security group"
+   value = module.rdsdb_sg.this_security_group_id
+ }
+
+
+
+
+Step 13 ec2-instance-auto.tfvars create this file and paste the configs below
+
+
+# EC2 Instance Variables
+instance_type = "t3.micro"
+instance_keypair = "terraform-key"
+private_instance_count = 2
+
+
+
+Step 14 ec2-instance-outputs.tf //  create this file and paste the configs below
+
+# AWS EC2 Instance Terraform Outputs
+# Public EC2 Instances - Bastion Host
+
+## ec2_public_instance_ids
+output "ec2_public_instance_ids" {
+ description = "List of IDs of instances"
+ value       = module.ec2_public.id
+}
+## ec2_public_instance_ids
+output "ec2_public2_instance_ids" {
+ description = "List of IDs of instances"
+ value       = module.ec2_public2.id
+}
+
+## ec2_public_ip
+output "ec2_public_ip" {
+ description = "List of public IP addresses assigned to the instances"
+ value       = module.ec2_public.public_ip
+}
+## ec2_public_ip2
+output "ec2_public2_ip" {
+ description = "List of public IP addresses assigned to the instances"
+ value       = module.ec2_public2.public_ip
+}
+
+# Private EC2 Instances
+## ec2_private_instance_ids
+
+output "ec2_private_instance_ids" {
+ description = "List of IDs of instances"
+ #value       = [module.ec2_private.id]
+ value = [for ec2private in module.ec2_private: ec2private.id ]  
+}
+
+## ec2_private_ip
+output "ec2_private_ip" {
+ description = "List of private IP addresses assigned to the instances"
+ #value       = [module.ec2_private.private_ip]
+ value = [for ec2private in module.ec2_private: ec2private.private_ip ] 
+}
+
+
+
+
+
+
+
+Step 15 ec2-instance-private.tf create this file and paste the configs below
+# AWS EC2 Instance Terraform Module
+# EC2 Instances that will be created in VPC Private Subnets
+module "ec2_private" {
+ depends_on = [ module.vpc ] # this depends on is meta-argument function that means that until the main vpc is created before this private ec2 instance will be created
+ source  = "terraform-aws-modules/ec2-instance/aws"
+ version = "~>3.0"
+  #for_each = toset([ module.vpc.private_subnets[0],module.vpc.private_subnets[1] ])
+ for_each = toset(["0", "1"])
+ # insert the 10 required variables here
+ name                   = "ec2-private-svr"
+ ami                    = data.aws_ami.amzlinux2.id
+ instance_type          = var.instance_type
+ key_name               = var.instance_keypair
+ #monitoring             = true
+ vpc_security_group_ids = [module.private_sg.this_security_group_id]
+ #for_each = toset([" module.vpc.private_subnets[0]","module.vpc.private_subnets[1]"])
+subnet_id =  element(module.vpc.private_subnets, tonumber(each.key))
+
+ #instance_count   = var.private_instance_count
+ user_data = file("${path.module}/app1-install.sh")
+ tags = {
+   Name = "ec2-private-svr"
+ }
+}
+
+
+
+Step 16 ec2-instance-public.tf create this file and paste the configs below
+
+# AWS EC2 Instance Terraform Module
+# Bastion Host - EC2 Instance that will be created in VPC Public Subnet
+module "ec2_public" {
+ source  = "terraform-aws-modules/ec2-instance/aws"
+ version = "~>3.0"
+ # insert the 10 required variables here
+ name                   = "ec2-public-svr"
+ #instance_count         = 5
+ ami                    = data.aws_ami.amzlinux2.id
+ instance_type          = var.instance_type
+ key_name               = var.instance_keypair
+ #monitoring             = true
+ subnet_id              = module.vpc.public_subnets[0]
+ vpc_security_group_ids = [module.sg_public.this_security_group_id]
+ tags = {
+   Name ="ec2-public-svr"
+ }
+}
+
+module "ec2_public2" {
+ source  = "terraform-aws-modules/ec2-instance/aws"
+ version = "~>3.0"
+ # insert the 10 required variables here
+ name                   = "ec2-public-svr2"
+ #instance_count         = 5
+ ami                    = data.aws_ami.amzlinux2.id
+ instance_type          = var.instance_type
+ key_name               = var.instance_keypair
+ #monitoring             = true
+ subnet_id              = module.vpc.public_subnets[1]
+ vpc_security_group_ids = [module.sg_public.this_security_group_id]
+ tags = {
+   Name ="ec2-public-svr2"
+ }
+}
+
+
+
+
+
+Step 17 ec2-instance-variables.tf create this file and paste the configs below
+
+
+# AWS EC2 Instance Terraform Variables
+# EC2 Instance Variables
+
+# AWS EC2 Instance Type
+variable "instance_type" {
+ description = "EC2 Instance Type"
+ type = string
+ default = "t3.micro" 
+}
+
+# AWS EC2 Instance Key Pair
+variable "instance_keypair" {
+ description = "AWS EC2 Key pair that need to be associated with EC2 Instance"
+ type = string
+ default = "terraform-key"
+}
+
+# AWS EC2 Private Instance Count
+variable "private_instance_count" {
+ description = "AWS EC2 Private Instances Count"
+ type = number
+ default = 1 
+}
+
+
+
+
+Step 18 rds-module.tf create this file and paste the configs below 
+
+# Create AWS RDS Database
+module "rdsdb" {
+ source  = "terraform-aws-modules/rds/aws"
+ #version = "2.34.0"
+ version = "~>3.0.0"
+  identifier = var.db_instance_identifier
+
+ name     = var.db_name  # Initial Database Name
+ username = var.db_username
+ password = var.db_password
+ port     = 3306
+
+
+ multi_az               = true
+ subnet_ids             = module.vpc.database_subnets
+ vpc_security_group_ids = [module.rdsdb_sg.this_security_group_id]
+
+ # All available versions: http://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_MySQL.html#MySQL.Concepts.VersionMgmt
+ engine               = "mysql"
+ engine_version       = "8.0.28"
+ family               = "mysql8.0" # DB parameter group
+ major_engine_version = "8.0"      # DB option group
+ instance_class       = "db.t3.micro"
+
+ allocated_storage     = 20
+ max_allocated_storage = 30
+ storage_encrypted     = false
+
+
+ maintenance_window              = "Mon:00:00-Mon:03:00"
+ backup_window                   = "03:00-06:00"
+ enabled_cloudwatch_logs_exports = ["general"]
+
+ backup_retention_period = 0
+ skip_final_snapshot     = true
+ deletion_protection     = false
+
+/* performance_insights_enabled          = true
+ performance_insights_retention_period = 7
+ create_monitoring_role                = true
+ monitoring_interval                   = 60
+*/
+ parameters = [
+   {
+     name  = "character_set_client"
+     value = "utf8mb4"
+   },
+   {
+     name  = "character_set_server"
+     value = "utf8mb4"
+   }
+ ]
+
+ tags = {
+   Name = "rdsdb"
+ }
+ db_instance_tags = {
+   "Sensitive" = "high"
+ }
+ db_option_group_tags = {
+   "Sensitive" = "low"
+ }
+ db_parameter_group_tags = {
+   "Sensitive" = "low"
+ }
+ db_subnet_group_tags = {
+   "Sensitive" = "high"
+ }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+Step 19 rds-outputs.tf create this file and paste the configs below 
+
+# RDS DB Outputs
+output "db_instance_address" {
+ description = "The address of the RDS instance"
+ value       = module.rdsdb.db_instance_address
+}
+
+output "db_instance_arn" {
+ description = "The ARN of the RDS instance"
+ value       = module.rdsdb.db_instance_arn
+}
+
+output "db_instance_availability_zone" {
+ description = "The availability zone of the RDS instance"
+ value       = module.rdsdb.db_instance_availability_zone
+}
+
+output "db_instance_endpoint" {
+ description = "The connection endpoint"
+ value       = module.rdsdb.db_instance_endpoint
+}
+
+output "db_instance_hosted_zone_id" {
+ description = "The canonical hosted zone ID of the DB instance (to be used in a Route 53 Alias record)"
+ value       = module.rdsdb.db_instance_hosted_zone_id
+}
+
+output "db_instance_id" {
+ description = "The RDS instance ID"
+ value       = module.rdsdb.db_instance_id
+}
+
+output "db_instance_resource_id" {
+ description = "The RDS Resource ID of this instance"
+ value       = module.rdsdb.db_instance_resource_id
+}
+
+output "db_instance_status" {
+ description = "The RDS instance status"
+ value       = module.rdsdb.db_instance_status
+}
+
+output "db_instance_name" {
+ description = "The database name"
+ value       = module.rdsdb.db_instance_name
+}
+
+output "db_instance_username" {
+ description = "The master username for the database"
+ value       = module.rdsdb.db_instance_username
+ sensitive   = true
+}
+
+output "db_instance_password" {
+ description = "The database password (this password may be old, because Terraform doesn't track it after initial creation)"
+ value       = module.rdsdb.db_instance_password
+ sensitive   = true
+}
+
+output "db_instance_port" {
+ description = "The database port"
+ value       = module.rdsdb.db_instance_port
+}
+
+output "db_subnet_group_id" {
+ description = "The db subnet group name"
+ value       = module.rdsdb.db_subnet_group_id
+}
+
+output "db_subnet_group_arn" {
+ description = "The ARN of the db subnet group"
+ value       = module.rdsdb.db_subnet_group_arn
+}
+
+output "db_parameter_group_id" {
+ description = "The db parameter group id"
+ value       = module.rdsdb.db_parameter_group_id
+}
+
+output "db_parameter_group_arn" {
+ description = "The ARN of the db parameter group"
+ value       = module.rdsdb.db_parameter_group_arn
+}
+
+output "db_enhanced_monitoring_iam_role_arn" {
+ description = "The Amazon Resource Name (ARN) specifying the monitoring role"
+ value       = module.rdsdb.enhanced_monitoring_iam_role_arn
+}
+
+
+Step 20 rds-outputs.tf create this file and paste the configs below 
+
+# RDS DB Outputs
+output "db_instance_address" {
+ description = "The address of the RDS instance"
+ value       = module.rdsdb.db_instance_address
+}
+
+output "db_instance_arn" {
+ description = "The ARN of the RDS instance"
+ value       = module.rdsdb.db_instance_arn
+}
+
+output "db_instance_availability_zone" {
+ description = "The availability zone of the RDS instance"
+ value       = module.rdsdb.db_instance_availability_zone
+}
+
+output "db_instance_endpoint" {
+ description = "The connection endpoint"
+ value       = module.rdsdb.db_instance_endpoint
+}
+
+output "db_instance_hosted_zone_id" {
+ description = "The canonical hosted zone ID of the DB instance (to be used in a Route 53 Alias record)"
+ value       = module.rdsdb.db_instance_hosted_zone_id
+}
+
+output "db_instance_id" {
+ description = "The RDS instance ID"
+ value       = module.rdsdb.db_instance_id
+}
+
+output "db_instance_resource_id" {
+ description = "The RDS Resource ID of this instance"
+ value       = module.rdsdb.db_instance_resource_id
+}
+
+output "db_instance_status" {
+ description = "The RDS instance status"
+ value       = module.rdsdb.db_instance_status
+}
+
+output "db_instance_name" {
+ description = "The database name"
+ value       = module.rdsdb.db_instance_name
+}
+
+output "db_instance_username" {
+ description = "The master username for the database"
+ value       = module.rdsdb.db_instance_username
+ sensitive   = true
+}
+
+output "db_instance_password" {
+ description = "The database password (this password may be old, because Terraform doesn't track it after initial creation)"
+ value       = module.rdsdb.db_instance_password
+ sensitive   = true
+}
+
+output "db_instance_port" {
+ description = "The database port"
+ value       = module.rdsdb.db_instance_port
+}
+
+output "db_subnet_group_id" {
+ description = "The db subnet group name"
+ value       = module.rdsdb.db_subnet_group_id
+}
+
+output "db_subnet_group_arn" {
+ description = "The ARN of the db subnet group"
+ value       = module.rdsdb.db_subnet_group_arn
+}
+
+output "db_parameter_group_id" {
+ description = "The db parameter group id"
+ value       = module.rdsdb.db_parameter_group_id
+}
+
+output "db_parameter_group_arn" {
+ description = "The ARN of the db parameter group"
+ value       = module.rdsdb.db_parameter_group_arn
+}
+
+output "db_enhanced_monitoring_iam_role_arn" {
+ description = "The Amazon Resource Name (ARN) specifying the monitoring role"
+ value       = module.rdsdb.enhanced_monitoring_iam_role_arn
+}
+
+
+Step 21 rds-variables.tf create this file and paste the configs below 
+
+
+# Terraform AWS RDS Database Variables
+# Place holder file for AWS RDS Database
+
+# DB Name
+variable "db_name" {
+  description = "AWS RDS Database Name"
+  type        = string
+}
+# DB Instance Identifier
+variable "db_instance_identifier" {
+  description = "AWS RDS Database Instance Identifier"
+  type        = string
+}
+# DB Username - Enable Sensitive flag
+variable "db_username" {
+  description = "AWS RDS Database Administrator Username"
+  type        = string
+}
+# DB Password - Enable Sensitive flag
+variable "db_password" {
+  description = "AWS RDS Database Administrator Password"
+  type        = string
+  sensitive   = true
+}
+
+
+
+
+Step 22 rds.auto.tfvars create this file and paste the configs below
+
+# RDS Database Variables
+db_name = "webappdb"
+db_instance_identifier = "webappdb"
+db_username = "dbadmin"
+db_password = "dbpassword11" //i hard coded the password for the db for this lab in a production environment this is not recommended 
+
+
+
+Step 23 null-resource-provisioner.tf create this file ans paste the configs below
+
+# Create a Null Resource and Provisioners are implemented in terraform when you want provison or copy files from your local server to your remote server
+resource "null_resource" "name" {
+ depends_on = [module.ec2_public]//this is ec2-public-svr1
+ # Connection Block for Provisioners to connect to EC2 Instance
+ connection {
+   type     = "ssh"
+   host     = module.ec2_public.public_ip  
+   user     = "ec2-user"
+   password = ""
+   private_key = file("/Users/joemile/Downloads/terraform-key.pem")
+ } 
+
+## File Provisioner: Copies the terraform-key.pem file to /tmp/terraform-key.pem
+ provisioner "file" {
+   source      = "/Users/joemile/Downloads/terraform-key.pem"
+   destination = "/tmp/terraform-key.pem"
+ }
+## Remote Exec Provisioner: Using remote-exec provisioner fix the private key permissions on Bastion Host
+ provisioner "remote-exec" {
+   inline = [
+     "sudo chmod 400 /tmp/terraform-key.pem"
+   ]
+ }
+}
+
+
+
+## Step-24: Connect to your Bastion  EC2 Instance used to connect to private servers in your subnet  and Test
+
+# Connect to Bastion EC2 Instance from local desktop
+ssh -i /Users/joemile/Downloads/terraform-key.pem ec2-user@<PUBLIC_IP_FOR_BASTION_HOST>
+My keypem file is located here /Users/joemile/Downloads/terraform-key.pem" //note where yours is located
+
+
+# Curl Test for public EC2 Instance to Private EC2 Instances
+curl  http://<Private-Instance-1-Private-IP>
+curl  http://<Private-Instance-2-Private-IP>
+
+
+# Connect to Private EC2 Instances from public EC2 Instance
+ssh -i /tmp/terraform-key.pem ec2-user@<Private-Instance-1-Private-IP>
+
+cd /var/www/html
+ls -lrta
+Observation:
+1) Should find index.html
+2) Should find app1 folder
+3) Should find app1/index.html file
+4) Should find app1/metadata.html file
+
+curl http://169.254.169.254/latest/user-data
+
+# Additional Troubleshooting if any issues
+# Connect to Private EC2 Instances from Public Instance
+ssh -i /tmp/terraform-key.pem ec2-user@<Private-Instance-1-Private-IP>
+cd /var/log
+more cloud-init-output.log
+Observation:
+1) Verify the file cloud-init-output.log to see if any issues
+2) This file (cloud-init-output.log) will show you if your httpd package got installed and all your userdata commands executed successfully or not
+```
+
+
+
+Step 25 Execute Terraform Commands
+
+Run the terraform commands in sequential order
+
+
+# Terraform Initialize
+terraform init
+
+# Terraform Validate
+terraform validate
+
+# Terraform Plan
+terraform plan
+Observation:
+1) Review Security Group resources
+2) Review EC2 Instance resources
+
+
+3) Review all other resources (vpc,rds)
+
+# Terraform Apply
+terraform apply -auto-approve
+
+
+The Deployed RDS Server 
+
+
+
+## Step-13: Clean-Up
+
+# Terraform Destroy
+terraform destroy -auto-approve
+
+# Clean-Up
+rm -rf .terraform*
+rm -rf terraform.tfstate*
+rm -rf .terraform.lock.hcl
+
+
+
+
+
+
